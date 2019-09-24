@@ -16,13 +16,11 @@
 # See comments in main about intesity
 
 from typing import Tuple, List, Union, Deque, Optional, TypeVar
-from collections import deque
+from collections import deque, Counter
 from random import seed, randint
 from enum import Enum
 
 import numpy as np
-
-_CUTTING_TIME = 30
 
 
 def _minutes_to_hhmm(minutes: int, offset: int = 9):
@@ -67,10 +65,11 @@ class CustomerStatus(Enum):
 
 class Customer(object):
 
-    def __init__(self, arrives_at: int, name: str, time_to_process: int):
+    def __init__(self, arrives_at: int, name: str, time_to_process: int, waiting_time: int):
         self.arrives_at = arrives_at
         self.str_id = name
         self.time_to_process = time_to_process
+        self.waiting_time = waiting_time
         self.waits_until: Optional[int] = None
         self.status = CustomerStatus.NOT_STARTED
         self.fulfillment_status: Optional[str] = None
@@ -95,7 +94,7 @@ class Customer(object):
 
     def can_enqueue(self, time) -> None:
         self.status = CustomerStatus.IN_Q
-        self.waits_until = time + self.time_to_process
+        self.waits_until = time + self.waiting_time
 
     def start_cutting(self) -> None:
         self.status = CustomerStatus.FINISHED
@@ -116,7 +115,7 @@ class Customer(object):
                 self.status = CustomerStatus.ARRIVED
                 messages = ['entered']
         else:
-            raise KeyError('unknown status')
+            raise KeyError(f'unknown status {self.status}')
 
         return self.status, messages
 
@@ -129,6 +128,7 @@ class Barber(object):
         self.active_customer: Optional[Customer] = None
         self.active_customer_finish_at: Optional[int] = None
         self.status = BarberStatus.NOT_STARTED
+        self.serviced_customers = 0
 
     def add_customer(self, customer: Customer, finishes_at: int) -> List[str]:
         assert self.status == BarberStatus.IN_SHIFT
@@ -137,6 +137,7 @@ class Barber(object):
 
         self.active_customer = customer
         self.active_customer_finish_at = finishes_at
+        self.serviced_customers += 1
 
         self.status = BarberStatus.CUTTING
 
@@ -176,18 +177,27 @@ class Barber(object):
 
 
 HairSalonType = TypeVar('HairSalonType', bound='HairSalon')
+
+
 class HairSalon(object):
-    def __init__(self, capacity: int, opens_at: int, closes_at: int,
-                 barbers_to_start: List[Barber], customers_to_start: List[Customer]):
+    def __init__(self, capacity: int, opens_at: int, closes_at: int, intensity: float,
+                 processing_time_from: int, processing_time_to: int, customer_waiting_time: int,
+                 barbers_to_start: List[Barber]):
         self.capacity = capacity
+        self.intensity = intensity
+        self.processing_time_from = processing_time_from
+        self.processing_time_to = processing_time_to
         self.waiting_customers: Deque[Customer] = deque()
         self.barbers_to_start = barbers_to_start
+        self.all_barbers = barbers_to_start[:]
         self.active_barbers: List[Barber] = []
-        self.customers_to_start = customers_to_start
+        self.customers_to_start: List[Customer] = []
+        self.customer_waiting_time = customer_waiting_time
         self.opens_at = opens_at
         self.closes_at = closes_at
         self.str_id = 'Hair Salon'
         self.messages: List[str] = []
+        self.all_customers: List[Customer] = []
 
     def add_messages(self, new_messages: List[str],
                      minute: int, what: Union[Customer, Barber, HairSalonType]):
@@ -266,7 +276,7 @@ class HairSalon(object):
             for active_barber in self.active_barbers:
                 if active_barber.status == BarberStatus.IN_SHIFT:
                     # let's service this customer.
-                    messages = active_barber.add_customer(customer, minute + _CUTTING_TIME)
+                    messages = active_barber.add_customer(customer, minute + customer.time_to_process)
                     self.add_messages(messages, minute, active_barber)
 
                     # we no longer care about this customer, it's being done and will be done no matter what.
@@ -289,6 +299,8 @@ class HairSalon(object):
         if minute == self.opens_at:
             self.add_messages(['opened'], minute, self)
 
+        self.simulate_incoming_customers(minute)
+
         self.simulate_end_shift(minute)
 
         self.simulate_begin_shift(minute)
@@ -297,36 +309,35 @@ class HairSalon(object):
         if not self.simulate_close(minute):
             return False
 
-        self.simulate_incoming_customers(minute)
-
         # process waiting customers in the FIFO order.
         self.simulate_waiting_customers(minute)
 
         return True
 
-    def simulate(self, end_time):
-        for minute in range(end_time + 1):
+    def simulate(self):
+        minute = 0
+        customer_counter = 1
+        while True:
+            incoming = np.random.poisson(self.intensity)
+            for i in range(incoming):
+                customer = Customer(arrives_at=minute, name=f'Customer-{customer_counter}',
+                                    time_to_process=randint(self.processing_time_from, self.processing_time_to),
+                                    waiting_time=self.customer_waiting_time)
+                self.customers_to_start.append(customer)
+                self.all_customers.append(customer)
+
             if not self.simulate_minute(minute):
                 break
 
+            minute += 1
 
-def main():
+
+def main(total_time=8 * 60, q_size=1, arrival_time=10, processing_time_from=20, processing_time_to=40,
+         waiting_time=30):
     seed()
+    np.random.seed()
 
-    # generate customers.
-    total_time = 8 * 60
-
-    # this isn't quite what the task wants, what we want is to use
-    # exponetial random variable with intensity=10 minutes, but this is much easier.
-    customers_to_generate = total_time // 10
-
-    max_time = total_time + (10)  # + 10 minutes for late arrivals
-    customers = [Customer(arrives_at=randint(0, max_time),
-                          name=None,
-                          time_to_process=randint(20, 40)) for _ in range(customers_to_generate)]
-    customers = sorted(customers, key=lambda _: _.arrives_at)
-    for i, customer in enumerate(customers):
-        customer.str_id = f'Customer-{i + 1}'
+    intensity = 1 / arrival_time
 
     # generate barbers.
     first_shift_end = 4 * 60
@@ -341,10 +352,15 @@ def main():
                Barber(name='Heber', starts_at=first_shift_end, ends_at=second_shift_end)]
 
     # simulate.
-    salon = HairSalon(15, 0, total_time, barbers, customers)
-    salon.simulate(total_time + 40)  # last customer can arrive at 5PM and take 40 minutes to get cut
+    salon = HairSalon(q_size, 0, total_time, intensity, processing_time_from, processing_time_to, waiting_time,
+                      barbers)
+    salon.simulate()
     for message in salon.messages:
         print(message)
+
+    print('-----------------------------')
+    print(Counter((customer.fulfillment_status for customer in salon.all_customers)))
+    print(Counter((barber.serviced_customers for barber in salon.all_barbers)))
 
 
 main()
